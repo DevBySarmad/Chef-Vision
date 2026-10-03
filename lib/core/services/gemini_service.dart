@@ -8,7 +8,11 @@ import '../constants/api_constants.dart';
 import '../../features/recipe_scan/domain/entities/recipe_scan_result.dart';
 
 class GeminiService {
-  static const String _groqApiKey = ApiConstants.groqApiKey;
+  GeminiService({this.httpClient, String? apiKey})
+    : _groqApiKey = apiKey ?? ApiConstants.groqApiKey;
+
+  final http.Client? httpClient;
+  final String _groqApiKey;
   static const String _groqEndpoint = ApiConstants.groqEndpoint;
 
   // Primary model with higher OTPM rate limits
@@ -22,6 +26,12 @@ class GeminiService {
     required List<int> imageBytes,
     required String mimeType,
   }) async {
+    if (_groqApiKey.trim().isEmpty) {
+      throw StateError(
+        'Missing GROQ_API_KEY. Set it with --dart-define or .vscode/launch.json.',
+      );
+    }
+
     const promptText = '''
 You are ChefVision. Inspect the attached image and return ONLY a single valid JSON object.
 
@@ -40,30 +50,31 @@ Rules:
 
     for (final modelName in _modelsToTry) {
       try {
-        final response = await http.post(
-          Uri.parse(_groqEndpoint),
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $_groqApiKey',
-          },
-          body: jsonEncode({
-            "model": modelName,
-            "max_tokens": 500, // Reduced token limit to strictly prevent HTTP 429 rate limit
-            "messages": [
-              {
-                "role": "user",
-                "content": [
-                  {"type": "text", "text": promptText},
-                  {
-                    "type": "image_url",
-                    "image_url": {"url": "data:$mimeType;base64,$base64Image"},
-                  },
-                ],
-              },
-            ],
-            "response_format": {"type": "json_object"},
-          }),
-        );
+        final headers = {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $_groqApiKey',
+        };
+        final body = jsonEncode({
+          "model": modelName,
+          "max_tokens": 500,
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {"type": "text", "text": promptText},
+                {
+                  "type": "image_url",
+                  "image_url": {"url": "data:$mimeType;base64,$base64Image"},
+                },
+              ],
+            },
+          ],
+          "response_format": {"type": "json_object"},
+        });
+        final uri = Uri.parse(_groqEndpoint);
+        final response =
+            await (httpClient?.post(uri, headers: headers, body: body) ??
+                http.post(uri, headers: headers, body: body));
 
         if (response.statusCode == 200) {
           final resData = jsonDecode(response.body);
@@ -89,6 +100,7 @@ Rules:
           final recipes = rawRecipes
               .map(_recipeFromJson)
               .whereType<RecipeSuggestion>()
+              .take(3)
               .toList(growable: false);
 
           return RecipeScanResult(
@@ -97,6 +109,9 @@ Rules:
             ),
             recipes: recipes,
           );
+        } else if (response.statusCode == 401) {
+          lastError = 'Groq rejected GROQ_API_KEY (HTTP 401).';
+          break;
         } else {
           lastError =
               'Model $modelName HTTP ${response.statusCode}: ${response.body}';
